@@ -10,6 +10,7 @@
     "src/"
   ],
   "scripts": {
+    "prepare": "tsc",
     "prebuild": "rimraf dist/*",
     "build": "tsc",
     "prepack": "npm run build",
