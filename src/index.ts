@@ -53,6 +53,11 @@ type Http2Listener = (request: http2.Http2ServerRequest, response: http2.Http2Se
 
 export interface HttpolyglotOptions {
   /**
+   * Controls whether the server should listen for http2 connections.
+   */
+  http2?: boolean;
+
+  /**
    * Enable support for incoming TLS connections. If a TLS configuration is provided, this will
    * be used to instantiate a TLS server to handle the connections. If a TLS server is provided,
    * then all incoming TLS connections will be emitted as 'connection' events on the given
@@ -79,9 +84,9 @@ export interface HttpolyglotOptions {
 class Server extends net.Server {
 
   private _httpServer: http.Server;
-  private _http2Server: http2.Http2Server;
-  private _tlsServer: EventEmitter;
-  private _socksHandler: EventEmitter | undefined;
+  private _http2Server: http2.Http2Server | undefined;
+  private _tlsServer: tls.Server | EventEmitter;
+  private _socksHandler: net.Server | EventEmitter | undefined;
   private _unknownProtocolHandler: EventEmitter | undefined;
 
   constructor(config: HttpolyglotOptions, requestListener: http.RequestListener);
@@ -113,7 +118,9 @@ class Server extends net.Server {
 
     // Create subservers for each supported protocol:
     this._httpServer = new http.Server(boundListener);
-    this._http2Server = http2.createServer({}, boundListener as any as Http2Listener);
+    if(config.http2 ?? true) {
+      this._http2Server = http2.createServer({}, boundListener as any as Http2Listener);
+    }
 
     if (config.tls) {
       if (config.tls instanceof tls.Server) {
@@ -135,7 +142,9 @@ class Server extends net.Server {
     this._socksHandler = config.socks;
     this._unknownProtocolHandler = config.unknownProtocol;
 
-    const subServers = [this._httpServer, this._http2Server, this._tlsServer];
+    const subServers: EventEmitter[] = [this._httpServer];
+    if (this._http2Server) subServers.push(this._http2Server);
+    subServers.push(this._tlsServer);
     if (this._socksHandler) subServers.push(this._socksHandler);
     if (this._unknownProtocolHandler) subServers.push(this._unknownProtocolHandler);
 
@@ -178,7 +187,7 @@ class Server extends net.Server {
       } else if (this._socksHandler && isSocks(data)) {
         this._socksHandler.emit('connection', socket);
       } else {
-        if (couldBeHttp2(data)) {
+        if (this._http2Server && couldBeHttp2(data)) {
           // The connection _might_ be HTTP/2. To confirm, we need to keep
           // reading until we get the whole stream:
           this.http2Listener(socket);
@@ -195,6 +204,7 @@ class Server extends net.Server {
 
   private tlsListener(tlsSocket: tls.TLSSocket) {
     if (
+      !this._http2Server || // http2 disabled
       tlsSocket.alpnProtocol === false || // Old non-ALPN client
       tlsSocket.alpnProtocol === 'http/1.1' || // Modern HTTP/1.1 ALPN client
       tlsSocket.alpnProtocol === 'http 1.1' // Broken ALPN client (e.g. https-proxy-agent)
@@ -207,7 +217,7 @@ class Server extends net.Server {
 
   private http2Listener(socket: net.Socket, pastData?: Buffer) {
     const h1Server = this._httpServer;
-    const h2Server = this._http2Server;
+    const h2Server = this._http2Server!;
 
     const newData: Buffer = socket.read() || Buffer.from([]);
     const data = pastData ? Buffer.concat([pastData, newData]) : newData;
